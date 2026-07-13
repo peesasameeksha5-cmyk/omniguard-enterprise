@@ -35,10 +35,10 @@ module.exports = {
       if (rule.ext && !rule.ext.includes(ext)) continue;
       // Path pattern check (e.g., only GitHub Actions workflows)
       if (rule.pathMatch && !rule.pathMatch.test(filePath)) {
-        // Allow check but skip if specifically targeted to another CI system
-        if (rule.rule_id.startsWith('CICD-GHA-') && !filePath.toLowerCase().includes('.github/workflows')) continue;
-        if (rule.rule_id.startsWith('CICD-GL-') && !filePath.toLowerCase().includes('.gitlab-ci')) continue;
-        if (rule.rule_id.startsWith('CICD-CC-') && !filePath.toLowerCase().includes('.circleci')) continue;
+        // Skip CI-system-specific rules when path doesn't match the expected CI system
+        if (rule.id.startsWith('CICD-GHA-') && !filePath.toLowerCase().includes('.github/workflows')) continue;
+        if (rule.id.startsWith('CICD-GL-') && !filePath.toLowerCase().includes('.gitlab-ci')) continue;
+        if (rule.id.startsWith('CICD-CC-') && !filePath.toLowerCase().includes('.circleci')) continue;
       }
 
       rule.re.lastIndex = 0;

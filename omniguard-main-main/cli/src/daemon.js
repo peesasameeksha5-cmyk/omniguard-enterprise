@@ -1003,6 +1003,56 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // /scan-file — single file scan endpoint (VS Code extension, MCP, CI hooks)
+  // POST { filePath: string, content?: string, orgId?: string }
+  // Returns { findings: Finding[], files_scanned: 1 }
+  if (req.method === 'POST' && req.url === '/scan-file') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        const payload = JSON.parse(body);
+        const { filePath, content: providedContent, orgId } = payload;
+
+        if (!filePath || typeof filePath !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'filePath is required' }));
+        }
+
+        // Security: path must be absolute and on the local machine
+        const resolved = path.resolve(filePath);
+        const content = providedContent !== undefined
+          ? String(providedContent)
+          : (() => { try { return fs.readFileSync(resolved, 'utf8'); } catch { return ''; } })();
+
+        if (!content.trim()) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ findings: [], files_scanned: 1 }));
+        }
+
+        const lines = content.split('\n');
+        const baseName = path.basename(resolved);
+        const findings = scannerEngine.scanFile(resolved, content);
+
+        log(`[/scan-file] ${resolved}: ${findings.length} finding(s)`);
+
+        // Publish on event bus so listeners (Supabase worker, threat engine) receive findings
+        for (const f of findings) {
+          eventBus.emit(eventBus.Events.FINDING_CREATED, f);
+        }
+        eventBus.emit(eventBus.Events.SCAN_COMPLETED, { filePath: resolved, findingsCount: findings.length });
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ findings, files_scanned: 1 }));
+      } catch (err) {
+        log(`[/scan-file] Error: ${err.message}`);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/enable-gate') {
     let body = '';
     req.on('data', chunk => { body += chunk; });

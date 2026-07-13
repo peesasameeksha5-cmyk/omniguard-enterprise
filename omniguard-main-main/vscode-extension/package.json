@@ -2,7 +2,7 @@
   "name": "omniguard",
   "displayName": "OmniGuard Security",
   "description": "AI-powered application security scanner — inline diagnostics, secret detection, SAST, and AI remediation",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "publisher": "omniguard",
   "icon": "media/icon.png",
   "repository": {
@@ -30,11 +30,16 @@
     "commands": [
       { "command": "omniguard.scanFile",          "title": "OmniGuard: Scan Current File" },
       { "command": "omniguard.scanWorkspace",     "title": "OmniGuard: Scan Workspace" },
-      { "command": "omniguard.configure",         "title": "OmniGuard: Configure" },
+      { "command": "omniguard.configure",         "title": "OmniGuard: Configure / Login" },
       { "command": "omniguard.clearDiagnostics",  "title": "OmniGuard: Clear Diagnostics" },
       { "command": "omniguard.showFindings",      "title": "OmniGuard: Show Findings Panel" },
       { "command": "omniguard.nexusGraph",        "title": "OmniGuard: Show Architecture Nexus" },
-      { "command": "omniguard.agentMap",          "title": "OmniGuard: Run System Mapping Agent" }
+      { "command": "omniguard.agentMap",          "title": "OmniGuard: Run System Mapping Agent" },
+      { "command": "omniguard.explain",           "title": "OmniGuard: Explain Finding" },
+      { "command": "omniguard.fixFinding",        "title": "OmniGuard: Fix Finding (AI Remediation)" },
+      { "command": "omniguard.createJira",        "title": "OmniGuard: Create Jira Ticket" },
+      { "command": "omniguard.createServiceNow",  "title": "OmniGuard: Create ServiceNow Incident" },
+      { "command": "omniguard.showLogs",          "title": "OmniGuard: Show Output Logs" }
     ],
     "configuration": {
       "title": "OmniGuard",
@@ -48,6 +53,21 @@
           "type": "string",
           "default": "",
           "description": "OmniGuard API key from Dashboard → Settings → API Keys"
+        },
+        "omniguard.cliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the omniguard CLI binary or index.js (leave blank to auto-detect)"
+        },
+        "omniguard.daemonPort": {
+          "type": "number",
+          "default": 5175,
+          "description": "Port that the OmniGuard local daemon listens on"
+        },
+        "omniguard.scanTimeout": {
+          "type": "number",
+          "default": 30000,
+          "description": "Maximum time in ms to wait for a CLI scan to complete before aborting"
         },
         "omniguard.enableOnSave": {
           "type": "boolean",
@@ -67,8 +87,8 @@
         },
         "omniguard.scanDelay": {
           "type": "number",
-          "default": 1000,
-          "description": "Debounce delay in ms for on-type scanning"
+          "default": 800,
+          "description": "Debounce delay in ms before scanning after save"
         },
         "omniguard.excludePatterns": {
           "type": "array",
@@ -81,7 +101,12 @@
       "editor/context": [
         {
           "command": "omniguard.scanFile",
-          "group": "omniguard",
+          "group": "omniguard@1",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "omniguard.showFindings",
+          "group": "omniguard@2",
           "when": "editorTextFocus"
         }
       ],
@@ -91,8 +116,7 @@
           "group": "omniguard"
         }
       ]
-    },
-    "statusBar": []
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

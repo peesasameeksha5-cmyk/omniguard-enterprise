@@ -676,7 +676,7 @@ async function cmdExplain(args) {
   if (filePath && fs.existsSync(filePath)) {
     console.log(c.blue(`Performing local AI analysis for rule ${id} on file ${filePath}...`));
     const content = fs.readFileSync(filePath, 'utf8');
-    const findings = localScan(filePath, content);
+    const findings = scannerEngine.scanFile(filePath, content);
     const finding = findings.find(f => f.rule_id === id);
     if (!finding) throw new Error(`No finding for rule ${id} found in file ${filePath}`);
 
@@ -1817,7 +1817,9 @@ async function main() {
   const secondArg = args[1]
 
   // Pre-Authentication Gatekeeper: Protected commands require an active API key
-  const bypassCommands = ['login', 'signup', 'version', 'doctor', 'tui', 'help', '-h', '--help']
+  // scan, fix, explain, hooks, init, doctor work fully offline — no backend required.
+  // login and signup are pre-auth. All others require a saved API key.
+  const bypassCommands = ['login', 'signup', 'version', 'doctor', 'tui', 'help', '-h', '--help', 'scan', 'fix', 'explain', 'init', 'install-hooks', 'hooks']
   const current = api.cfg()
   if (!current.apiKey && !bypassCommands.includes(firstArg)) {
     console.error(c.red(`Error: Authentication required. Please run 'omniguard login' or 'omniguard signup' first.`))
