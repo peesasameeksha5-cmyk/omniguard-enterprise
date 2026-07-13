@@ -144,6 +144,126 @@ function supabaseCall(method, table, query = '', body = null) {
   });
 }
 
+/**
+ * Resolve AI config for an org, using vault-stored keys when available.
+ *
+ * Resolution order:
+ *   1. secrets-proxy edge function (reads vault → full keys, never plaintext in DB)
+ *   2. raw ai_config JSONB fallback (legacy / vault unavailable)
+ *   3. process.env AI key vars (local dev / .env.credentials)
+ *
+ * This ensures keys set in the frontend Settings page are ALWAYS used by the daemon
+ * without ever storing them in environment variables on the host machine.
+ */
+async function resolveOrgAIConfig(orgId) {
+  if (!orgId || !SUPABASE_URL) {
+    // No backend — use env vars only
+    return buildEnvAIConfig();
+  }
+
+  try {
+    // Use service role key to read vault directly via Supabase REST API
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_SERVICE_KEY || '';
+    if (!serviceKey || !SUPABASE_URL) throw new Error('no service key');
+
+    // Step 1: get ai_config + vault ID
+    const orgRes = await new Promise((resolve, reject) => {
+      const https = require('https');
+      const url = new URL(`${SUPABASE_URL}/rest/v1/organizations?id=eq.${orgId}&select=ai_config,ai_keys_vault_id`);
+      const req = https.request({
+        hostname: url.hostname, port: 443,
+        path: url.pathname + url.search, method: 'GET',
+        headers: { 'apikey': serviceKey, 'Authorization': `Bearer ${serviceKey}`, 'Accept': 'application/json' }
+      }, (res) => { let b = ''; res.on('data', d => b += d); res.on('end', () => resolve({ status: res.statusCode, body: b })); });
+      req.on('error', reject);
+      req.setTimeout(5000, () => { req.destroy(); reject(new Error('timeout')); });
+      req.end();
+    });
+
+    if (orgRes.status !== 200) throw new Error(`org query ${orgRes.status}`);
+    const [org] = JSON.parse(orgRes.body);
+    if (!org) throw new Error('org not found');
+
+    const cfg = org.ai_config || {};
+
+    // Step 2: if vault ID exists, read vault secret
+    if (org.ai_keys_vault_id && cfg._vault === true) {
+      const vaultRes = await new Promise((resolve, reject) => {
+        const https = require('https');
+        const url = new URL(`${SUPABASE_URL}/rest/v1/rpc/vault_read_secret`);
+        const body = JSON.stringify({ secret_id: org.ai_keys_vault_id });
+        const req = https.request({
+          hostname: url.hostname, port: 443,
+          path: url.pathname, method: 'POST',
+          headers: { 'apikey': serviceKey, 'Authorization': `Bearer ${serviceKey}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+        }, (res) => { let b = ''; res.on('data', d => b += d); res.on('end', () => resolve({ status: res.statusCode, body: b })); });
+        req.on('error', reject);
+        req.setTimeout(5000, () => { req.destroy(); reject(new Error('vault timeout')); });
+        req.write(body); req.end();
+      });
+
+      if (vaultRes.status === 200) {
+        const secret = JSON.parse(vaultRes.body);
+        if (secret) {
+          const vaultKeys = JSON.parse(typeof secret === 'string' ? secret : JSON.stringify(secret));
+          const result = { provider: cfg.provider || 'none', ...vaultKeys };
+          if (cfg.max_tokens_per_scan) result.max_tokens_per_scan = cfg.max_tokens_per_scan;
+          if (cfg.disable_deep_tier !== undefined) result.disable_deep_tier = cfg.disable_deep_tier;
+          if (cfg.fallback_provider) result.fallback_provider = cfg.fallback_provider;
+          if (cfg.ollama_url) result.ollama_url = cfg.ollama_url;
+          if (cfg.azure_openai_endpoint) result.azure_openai_endpoint = cfg.azure_openai_endpoint;
+          log(`[AI] Resolved keys from vault for org ${orgId}: provider=${result.provider}`);
+          return result;
+        }
+      }
+    }
+
+    // Fallback: base64-encoded keys in ai_config
+    if (cfg._keys_encoded) {
+      const vaultKeys = JSON.parse(atob(cfg._keys_encoded));
+      const result = { provider: cfg.provider || 'none', ...vaultKeys };
+      if (cfg.max_tokens_per_scan) result.max_tokens_per_scan = cfg.max_tokens_per_scan;
+      log(`[AI] Resolved keys from ai_config (base64) for org ${orgId}: provider=${result.provider}`);
+      return result;
+    }
+
+    // Fallback: legacy plaintext in ai_config
+    const merged = buildEnvAIConfig();
+    if (cfg.provider && cfg.provider !== 'none') merged.provider = cfg.provider;
+    const keyFields = ['anthropic_api_key','openai_api_key','aws_access_key_id','aws_secret_access_key','azure_openai_key','gemini_api_key','openrouter_api_key','ollama_url'];
+    for (const f of keyFields) { if (cfg[f]) merged[f] = cfg[f]; }
+    if (cfg.max_tokens_per_scan) merged.max_tokens_per_scan = cfg.max_tokens_per_scan;
+    if (cfg.disable_deep_tier !== undefined) merged.disable_deep_tier = cfg.disable_deep_tier;
+    if (cfg.fallback_provider) merged.fallback_provider = cfg.fallback_provider;
+    return merged;
+  } catch (err) {
+    log(`[AI] Vault resolution failed (${err.message}) — falling back to env vars`);
+    return buildEnvAIConfig();
+  }
+}
+
+/** Build AIConfig from process.env only */
+function buildEnvAIConfig() {
+  const providers = ['anthropic', 'openai', 'gemini', 'openrouter', 'ollama', 'bedrock', 'azure'];
+  const envMap = {
+    anthropic:  { key: 'ANTHROPIC_API_KEY',   field: 'anthropic_api_key' },
+    openai:     { key: 'OPENAI_API_KEY',       field: 'openai_api_key' },
+    gemini:     { key: 'GEMINI_API_KEY',       field: 'gemini_api_key' },
+    openrouter: { key: 'OPENROUTER_API_KEY',   field: 'openrouter_api_key' },
+    ollama:     { key: 'OLLAMA_BASE_URL',      field: 'ollama_url' },
+  };
+  const cfg = { provider: 'none' };
+  for (const p of providers) {
+    const e = envMap[p];
+    if (e && process.env[e.key]) {
+      cfg[e.field] = process.env[e.key];
+      if (cfg.provider === 'none') cfg.provider = p;
+    }
+  }
+  if (process.env.AWS_ACCESS_KEY_ID) { cfg.aws_access_key_id = process.env.AWS_ACCESS_KEY_ID; cfg.aws_secret_access_key = process.env.AWS_SECRET_ACCESS_KEY; cfg.aws_region = process.env.AWS_REGION || 'us-east-1'; if (cfg.provider === 'none') cfg.provider = 'bedrock'; }
+  return cfg;
+}
+
 // Real-time recursive graph updater — stores nodes in dedicated graph_nodes table
 async function updateSecureDesignGraph(orgId, repoPath, repoName) {
   log(`Rebuilding Secure Design Graph recursively for repo: ${repoName} at path: ${repoPath}`);
@@ -1177,7 +1297,7 @@ const server = http.createServer(async (req, res) => {
         let aiConfig = {};
         try {
           const orgRes = await supabaseCall('GET', 'organizations', `?id=eq.${orgId}`);
-          aiConfig = orgRes.body?.[0]?.ai_config || {};
+          aiConfig = await resolveOrgAIConfig(orgId);
         } catch {}
 
         // Run the REAL compliance scan
@@ -1345,7 +1465,7 @@ const server = http.createServer(async (req, res) => {
           let aiConfig = {};
           try {
             const orgRes = await supabaseCall('GET', 'organizations', `?id=eq.${orgId}`);
-            aiConfig = orgRes.body?.[0]?.ai_config || {};
+            aiConfig = await resolveOrgAIConfig(orgId);
           } catch {}
 
           const prompt = `You are the OmniGuard AI Compliance Parser.
@@ -1466,7 +1586,7 @@ Return ONLY the raw JSON array. Do not wrap it in markdown code blocks.`;
         let aiConfig = {};
         try {
           const orgRes = await supabaseCall('GET', 'organizations', `?id=eq.${orgId}`);
-          aiConfig = orgRes.body?.[0]?.ai_config || {};
+          aiConfig = await resolveOrgAIConfig(orgId);
         } catch {}
 
         let aiExplanation = '';
@@ -1625,7 +1745,7 @@ Return ONLY the raw JSON string. Do not wrap it in markdown code blocks or expla
         let aiConfig = {};
         try {
           const orgRes = await supabaseCall('GET', 'organizations', `?id=eq.${orgId}`);
-          aiConfig = orgRes.body?.[0]?.ai_config || {};
+          aiConfig = await resolveOrgAIConfig(orgId);
         } catch {}
 
         const fileContent = fs.readFileSync(fullFilePath, 'utf8');
@@ -1776,7 +1896,7 @@ Return ONLY the fixed code, no explanations, no markdown wrappers.`;
         let aiConfig = {};
         try {
           const orgRes = await supabaseCall('GET', 'organizations', `?id=eq.${orgId}`);
-          aiConfig = orgRes.body?.[0]?.ai_config || {};
+          aiConfig = await resolveOrgAIConfig(orgId);
         } catch {}
 
         // Run the REAL compliance scan
@@ -1849,7 +1969,7 @@ Return ONLY the fixed code, no explanations, no markdown wrappers.`;
         let aiConfig = {};
         try {
           const orgRes = await supabaseCall('GET', 'organizations', `?id=eq.${orgId}`);
-          aiConfig = orgRes.body?.[0]?.ai_config || {};
+          aiConfig = await resolveOrgAIConfig(orgId);
         } catch {}
 
         if (!aiConfig.apiKey && !process.env.ANTHROPIC_API_KEY) {
@@ -2058,7 +2178,7 @@ Return ONLY the raw fixed code. Do not use markdown wrappers, no \`\`\` wrappers
           let aiConfig = null;
           try {
             const orgRes = await supabaseCall('GET', 'organizations', `?id=eq.${orgId}`);
-            aiConfig = orgRes.body?.[0]?.ai_config || {};
+            aiConfig = await resolveOrgAIConfig(orgId);
           } catch(e) {}
           
           const prompt = `You are the OmniGuard IaC Security Remediation Engine.
@@ -2131,7 +2251,7 @@ Generate the updated, compliant code. Return ONLY the complete drop-in replaceme
         let aiConfig = null;
         try {
           const orgRes = await supabaseCall('GET', 'organizations', `?id=eq.${orgId}`);
-          aiConfig = orgRes.body?.[0]?.ai_config || {};
+          aiConfig = await resolveOrgAIConfig(orgId);
         } catch(e) {}
         
         const scanId = `drift-fix-scan-${Date.now()}`;
@@ -2195,16 +2315,14 @@ Generate the updated, compliant code. Return ONLY the complete drop-in replaceme
         const payload = JSON.parse(body);
         const { findingId, title, filePath, lineStart, evidence, ruleId, orgId } = payload;
         
-        // Use Anthropic key from config if available
-        let anthropicKey = process.env.ANTHROPIC_API_KEY || '';
+        // Resolve AI config from vault (uses keys stored in frontend Settings page)
+        let daemonAiCfg = { provider: 'none', anthropic_api_key: process.env.ANTHROPIC_API_KEY || '' };
         try {
-          const orgRes = await supabaseCall('GET', 'organizations', `?id=eq.${orgId}`);
-          if (orgRes.body && orgRes.body.length > 0) {
-            anthropicKey = orgRes.body[0].ai_config?.anthropic_key || anthropicKey;
-          }
+          daemonAiCfg = await resolveOrgAIConfig(orgId);
         } catch(e) {}
-        
-        if (!anthropicKey) {
+        const anthropicKey = daemonAiCfg.anthropic_api_key || daemonAiCfg.openai_api_key || process.env.ANTHROPIC_API_KEY || '';
+
+        if (!anthropicKey && daemonAiCfg.provider === 'none') {
           return res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'AI provider key not configured' }));
         }
 
@@ -2275,7 +2393,7 @@ Generate the updated, compliant code. Return ONLY the complete drop-in replaceme
         let aiConfig = null;
         try {
           const orgRes = await supabaseCall('GET', 'organizations', `?id=eq.${orgIdToUse}`);
-          aiConfig = orgRes.body?.[0]?.ai_config || {};
+          aiConfig = await resolveOrgAIConfig(orgId);
         } catch(e) {}
 
         const scanId = `git-commit-scan-${Date.now()}`;
@@ -2355,7 +2473,7 @@ Generate the updated, compliant code. Return ONLY the complete drop-in replaceme
         try {
           const orgRes = await supabaseCall('GET', 'organizations', `?id=eq.${orgId}`);
           if (orgRes.body && orgRes.body.length > 0) {
-            const aiConfig = orgRes.body[0].ai_config || {};
+            const aiConfig = await resolveOrgAIConfig(orgId);
             if (aiConfig.anthropic_key) anthropicKey = aiConfig.anthropic_key;
             if (aiConfig.workspace_path) configuredWorkspacePath = aiConfig.workspace_path;
           }
@@ -2503,7 +2621,7 @@ Generate the updated, compliant code. Return ONLY the complete drop-in replaceme
         let aiConfig = {};
         try {
           const orgRes = await supabaseCall('GET', 'organizations', `?id=eq.${orgId}`);
-          aiConfig = orgRes.body?.[0]?.ai_config || {};
+          aiConfig = await resolveOrgAIConfig(orgId);
         } catch {}
 
         log(`Running mandatory pre-commit compliance scan for orchestrator...`);
