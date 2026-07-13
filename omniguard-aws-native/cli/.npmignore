@@ -1,8 +1,0 @@
-.git
-node_modules
-package-lock.json
-publish.ps1
-publish.sh
-tests/
-.env
-.env.example
