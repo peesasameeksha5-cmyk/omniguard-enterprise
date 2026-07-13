@@ -620,7 +620,7 @@ async function cmdFix(args) {
   if (filePath && fs.existsSync(filePath)) {
     console.log(c.blue(`Performing local AI fix generation for rule ${id} on file ${filePath}...`));
     const content = fs.readFileSync(filePath, 'utf8');
-    const findings = localScan(filePath, content);
+    const findings = scannerEngine.scanFile(filePath, content);
     const finding = findings.find(f => f.rule_id === id);
     if (!finding) throw new Error(`No finding for rule ${id} found in file ${filePath}`);
 
@@ -1803,7 +1803,37 @@ const legacyHandlers = {
   shell: () => console.log('Starting interactive OmniGuard shell (Ctrl+C to exit)...'),
   completion: () => console.log('# Run this command to setup auto-completion:\n# source <(omniguard completion)'),
   benchmark: () => console.log('Benchmarking system performance:\n- Local file scan rate: 1,480 lines/sec (Optimal)\n- Network response time: 240ms (Pass)'),
-  diagnose: () => cmdDoctor()
+  diagnose: () => cmdDoctor(),
+  daemon: (args) => {
+    const sub = args[0] || 'start'
+    const daemonPath = path.join(__dirname, 'daemon.js')
+    if (sub === 'start') {
+      console.log(c.blue(`Starting OmniGuard daemon on port ${process.env.OMNIGUARD_DAEMON_PORT || 5175}...`))
+      const { spawn } = require('child_process')
+      const child = spawn(process.execPath, [daemonPath], {
+        detached: true,
+        stdio: ['ignore', 'inherit', 'inherit'],
+        env: { ...process.env }
+      })
+      child.unref()
+      console.log(c.green(`✓ Daemon started (PID ${child.pid})`))
+    } else if (sub === 'stop') {
+      const { execSync } = require('child_process')
+      try { execSync("pkill -f 'daemon.js'", { stdio: 'ignore' }) } catch {}
+      console.log(c.green('✓ Daemon stopped'))
+    } else if (sub === 'status') {
+      const http = require('http')
+      const req = http.request({ hostname: '127.0.0.1', port: parseInt(process.env.OMNIGUARD_DAEMON_PORT || '5175'), path: '/healthz', timeout: 2000 }, res => {
+        let body = ''
+        res.on('data', d => body += d)
+        res.on('end', () => console.log(c.green(`✓ Daemon running: ${body.trim()}`)))
+      })
+      req.on('error', () => console.log(c.red('✗ Daemon not running')))
+      req.end()
+    } else {
+      console.log(`Usage: omniguard daemon [start|stop|status]`)
+    }
+  }
 }
 
 async function main() {
@@ -1819,7 +1849,7 @@ async function main() {
   // Pre-Authentication Gatekeeper: Protected commands require an active API key
   // scan, fix, explain, hooks, init, doctor work fully offline — no backend required.
   // login and signup are pre-auth. All others require a saved API key.
-  const bypassCommands = ['login', 'signup', 'version', 'doctor', 'tui', 'help', '-h', '--help', 'scan', 'fix', 'explain', 'init', 'install-hooks', 'hooks']
+  const bypassCommands = ['login', 'signup', 'version', 'doctor', 'tui', 'help', '-h', '--help', 'scan', 'fix', 'explain', 'init', 'install-hooks', 'hooks', 'daemon']
   const current = api.cfg()
   if (!current.apiKey && !bypassCommands.includes(firstArg)) {
     console.error(c.red(`Error: Authentication required. Please run 'omniguard login' or 'omniguard signup' first.`))

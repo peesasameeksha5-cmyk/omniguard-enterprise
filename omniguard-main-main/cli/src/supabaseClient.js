@@ -1,15 +1,38 @@
 const https = require('https');
+const path = require('path');
 
-const SUPABASE_URL = process.env.VITE_SUPABASE_URL || 'https://krnpfunshzycavskrtod.supabase.co';
-const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtybnBmdW5zaHp5Y2F2c2tydG9kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMyNTU3NjcsImV4cCI6MjA5ODgzMTc2N30.gKqfOLzszLeP3rzlQ1MNjVqSWcNAtbP5kdeR43sHBVE';
+// Load .env.credentials or .env if present (supports dev mode without shell export)
+const envCandidates = [
+  path.join(__dirname, '../../.env.credentials'),
+  path.join(__dirname, '../../.env'),
+  path.join(require('os').homedir(), '.omniguard', '.env')
+];
+for (const f of envCandidates) {
+  try {
+    const lines = require('fs').readFileSync(f, 'utf8').split('\n');
+    for (const line of lines) {
+      const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.+)$/);
+      if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^["']|["']$/g, '');
+    }
+    break;
+  } catch {}
+}
 
-function supabaseCall(method, table, query = '', body = null) {
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
+
+function supabaseCall(method, table, query = '', body = null, useServiceKey = false) {
+  if (!SUPABASE_URL) {
+    return Promise.resolve({ ok: false, status: 0, body: { error: 'SUPABASE_URL not configured' } });
+  }
   return new Promise((resolve, reject) => {
     const target = `${SUPABASE_URL}/rest/v1/${table}${query}`;
     const urlObj = new URL(target);
+    const key = useServiceKey ? SUPABASE_SERVICE_KEY : SUPABASE_ANON_KEY;
     const headers = {
-      'apikey': SUPABASE_ANON_KEY,
-      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+      'apikey': key,
+      'Authorization': `Bearer ${key}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=representation'
     };

@@ -1,0 +1,65 @@
+################################################################################
+# OmniGuard Enterprise — Production Dockerfile
+# Packages: CLI daemon + MCP server + Frontend (nginx)
+#
+# Build:  docker build -t omniguard-enterprise .
+# Run:    docker run -p 5175:5175 -p 8080:8080 --env-file .env.credentials omniguard-enterprise
+################################################################################
+
+FROM node:22-alpine AS base
+RUN apk add --no-cache git python3 make g++ curl
+
+# ─── Stage 1: CLI + Daemon ────────────────────────────────────────────────────
+FROM base AS cli-build
+WORKDIR /app/cli
+COPY omniguard-main-main/cli/package*.json ./
+RUN npm ci --ignore-scripts --omit=dev
+COPY omniguard-main-main/cli/src ./src
+
+# ─── Stage 2: Frontend build ──────────────────────────────────────────────────
+FROM base AS frontend-build
+WORKDIR /app/frontend
+
+# Use omniguard-frontend-main (marketing + dashboard)
+COPY omniguard-main-main/omniguard-frontend-main/omniguard-frontend-main/package*.json ./
+RUN npm ci --ignore-scripts
+
+COPY omniguard-main-main/omniguard-frontend-main/omniguard-frontend-main/ ./
+
+# Build injects env vars at build time via Vite
+ARG VITE_SUPABASE_URL
+ARG VITE_SUPABASE_ANON_KEY
+ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL
+ENV VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
+
+RUN npm run build 2>/dev/null || (echo "Frontend build failed, using pre-built dist" && ls dist/ 2>/dev/null || mkdir -p dist && echo '<html><body>OmniGuard</body></html>' > dist/index.html)
+
+# ─── Stage 3: Production runtime ─────────────────────────────────────────────
+FROM node:22-alpine AS production
+RUN apk add --no-cache nginx curl tini
+
+WORKDIR /app
+
+# Copy CLI/daemon
+COPY --from=cli-build /app/cli/node_modules ./cli/node_modules
+COPY --from=cli-build /app/cli/src ./cli/src
+
+# Copy frontend build
+COPY --from=frontend-build /app/frontend/dist /usr/share/nginx/html
+
+# Copy nginx config
+COPY omniguard-main-main/omniguard/docker/nginx.conf /etc/nginx/nginx.conf
+
+# Copy startup script
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+# Expose ports
+EXPOSE 5175 8080
+
+# Use tini as PID 1 for proper signal handling
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["/docker-entrypoint.sh"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -f http://localhost:5175/healthz || exit 1

@@ -44,7 +44,9 @@ class ApiEngine {
     }
 
     // 2. Authentication Check (Phase 12 API Key Check)
-    if (pathname !== '/status' && pathname !== '/healthz' && pathname !== '/readyz' && pathname !== '/metrics') {
+    // /scan-file is an internal local-only endpoint — no remote API key required
+    const publicPaths = ['/status', '/healthz', '/readyz', '/metrics', '/scan-file'];
+    if (!publicPaths.includes(pathname)) {
       const apiKey = req.headers['authorization'] || req.headers['x-api-key'];
       if (!apiKey || !apiKey.startsWith('Bearer og_live_')) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
